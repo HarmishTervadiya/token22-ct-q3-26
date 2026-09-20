@@ -1,9 +1,14 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program::invoke;
-use anchor_spl::token_interface::{
-    approve, initialize_mint2, mint_close_authority_initialize, spl_token_2022, transfer_checked,
-    transfer_fee_initialize, Approve, InitializeMint2, Mint, MintCloseAuthorityInitialize,
-    TokenInterface, TransferChecked, TransferFeeInitialize,
+use anchor_spl::{
+    token_2022::spl_token_2022::state::AccountState,
+    token_interface::{
+        approve, default_account_state_initialize, initialize_mint2, metadata_pointer_initialize,
+        mint_close_authority_initialize, spl_token_2022, token_metadata_initialize,
+        transfer_checked, transfer_fee_initialize, Approve, DefaultAccountStateInitialize,
+        InitializeMint2, MetadataPointerInitialize, Mint, MintCloseAuthorityInitialize,
+        TokenInterface, TokenMetadataInitialize, TransferChecked, TransferFeeInitialize,
+    },
 };
 use spl_token_2022::{
     extension::{
@@ -53,6 +58,50 @@ impl<'info> InitializeMint<'info> {
             &self.token_program.key(),
         )?;
 
+        self.default_state_config()?;
+        self.metadata_pointer_config()?;
+        self.mint_close_config()?;
+
         Ok(())
+    }
+
+    pub fn default_state_config(&mut self) -> Result<()> {
+        default_account_state_initialize(
+            CpiContext::new(
+                self.token_program.key(),
+                DefaultAccountStateInitialize {
+                    mint: self.mint.to_account_info(),
+                    token_program_id: self.token_program.to_account_info(),
+                },
+            ),
+            &AccountState::Frozen,
+        )
+    }
+
+    pub fn metadata_pointer_config(&mut self) -> Result<()> {
+        metadata_pointer_initialize(
+            CpiContext::new(
+                self.token_program.key(),
+                MetadataPointerInitialize {
+                    mint: self.mint.to_account_info(),
+                    token_program_id: self.token_program.to_account_info(),
+                },
+            ),
+            Some(self.payer.key()),
+            Some(self.mint.key()),
+        )
+    }
+
+    pub fn mint_close_config(&mut self) -> Result<()> {
+        mint_close_authority_initialize(
+            CpiContext::new(
+                self.token_program.key(),
+                MintCloseAuthorityInitialize {
+                    mint: self.mint.to_account_info(),
+                    token_program_id: self.token_program.to_account_info(),
+                },
+            ),
+            Some(&self.payer.key()),
+        )
     }
 }
