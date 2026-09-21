@@ -1,3 +1,5 @@
+use std::u64;
+
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program::invoke;
 use anchor_spl::{
@@ -55,12 +57,26 @@ impl<'info> InitializeMint<'info> {
             ),
             lamports,
             space as u64,
-            &self.token_program.key(),
+            &self.payer.key(),
         )?;
 
         self.default_state_config()?;
         self.metadata_pointer_config()?;
         self.mint_close_config()?;
+        self.token_metadatat_config()?;
+        self.transfer_fee_config()?;
+
+        initialize_mint2(
+            CpiContext::new(
+                self.token_program.key(),
+                InitializeMint2 {
+                    mint: self.mint.to_account_info(),
+                },
+            ),
+            6,
+            &self.payer.key(),
+            None,
+        )?;
 
         Ok(())
     }
@@ -102,6 +118,40 @@ impl<'info> InitializeMint<'info> {
                 },
             ),
             Some(&self.payer.key()),
+        )
+    }
+
+    pub fn transfer_fee_config(&mut self) -> Result<()> {
+        transfer_fee_initialize(
+            CpiContext::new(
+                self.token_program.key(),
+                TransferFeeInitialize {
+                    mint: self.mint.to_account_info(),
+                    token_program_id: self.token_program.to_account_info(),
+                },
+            ),
+            Some(&self.payer.key()),
+            Some(&self.payer.key()),
+            100,
+            u64::MAX,
+        )
+    }
+
+    pub fn token_metadatat_config(&mut self) -> Result<()> {
+        token_metadata_initialize(
+            CpiContext::new(
+                self.token_program.key(),
+                TokenMetadataInitialize {
+                    mint: self.mint.to_account_info(),
+                    mint_authority: self.payer.to_account_info(),
+                    update_authority: self.payer.to_account_info(),
+                    program_id: self.token_program.to_account_info(),
+                    metadata: self.mint.to_account_info(),
+                },
+            ),
+            String::from("Test name"),
+            String::from("Test symbol"),
+            String::from("Test uri"),
         )
     }
 }
