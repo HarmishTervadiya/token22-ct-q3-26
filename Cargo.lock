@@ -4185,8 +4185,13 @@ dependencies = [
  "litesvm",
  "solana-keypair",
  "solana-message",
+ "solana-program-option",
+ "solana-pubkey 3.0.0",
  "solana-signer",
  "solana-transaction",
+ "spl-pod",
+ "spl-token-metadata-interface",
+ "spl-type-length-value",
 ]
 
 [[package]]

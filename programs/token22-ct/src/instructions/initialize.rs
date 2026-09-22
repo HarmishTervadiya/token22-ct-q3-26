@@ -1,26 +1,22 @@
-use std::u64;
-
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::program::invoke;
 use anchor_spl::{
-    token_2022::spl_token_2022::state::AccountState,
+    token_2022::spl_token_2022::{extension::ExtensionType, state::AccountState},
     token_interface::{
-        approve, default_account_state_initialize, initialize_mint2, metadata_pointer_initialize,
-        mint_close_authority_initialize, spl_token_2022, token_metadata_initialize,
-        transfer_checked, transfer_fee_initialize, Approve, DefaultAccountStateInitialize,
-        InitializeMint2, MetadataPointerInitialize, Mint, MintCloseAuthorityInitialize,
-        TokenInterface, TokenMetadataInitialize, TransferChecked, TransferFeeInitialize,
+        default_account_state_initialize, initialize_mint2, metadata_pointer_initialize,
+        mint_close_authority_initialize, token_metadata_initialize, transfer_fee_initialize,
+        DefaultAccountStateInitialize, InitializeMint2, MetadataPointerInitialize,
+        MintCloseAuthorityInitialize, TokenInterface, TokenMetadataInitialize,
+        TransferFeeInitialize,
     },
 };
-use spl_token_2022::{
-    extension::{
-        confidential_transfer::{instruction as confidential_instruction, DecryptableBalance},
-        confidential_transfer_fee::instruction as confidential_fee_instruction,
-        transfer_fee::TransferFeeConfig,
-        BaseStateWithExtensions, ExtensionType, StateWithExtensions,
-    },
-    state::Mint as MintState,
-};
+use anchor_spl::token_2022::spl_token_2022::state::Mint as MintState;
+use spl_token_metadata_interface::state::TokenMetadata;
+use spl_type_length_value::variable_len_pack::VariableLenPack;
+
+use crate::{DECIMALS, MAXIMUM_FEE, TOKEN_NAME, TOKEN_SYMBOL, TOKEN_URI, TRANSFER_FEE_BPS};
+
+/// TLV entry header: 2-byte extension type + 2-byte length.
+const TLV_HEADER_LEN: usize = 4;
 
 #[derive(Accounts)]
 pub struct InitializeMint<'info> {
@@ -35,17 +31,38 @@ pub struct InitializeMint<'info> {
 }
 
 impl<'info> InitializeMint<'info> {
-    pub fn intialize(&mut self) -> Result<()> {
-        let extensions: &[ExtensionType] = &[
+    pub fn initialize(&mut self) -> Result<()> {
+        // TokenMetadata is variable-length, so it cannot go through
+        // try_calculate_account_len (that returns InvalidArgument).
+        let fixed_extensions: &[ExtensionType] = &[
             ExtensionType::TransferFeeConfig,
+            ExtensionType::MintCloseAuthority,
             ExtensionType::DefaultAccountState,
             ExtensionType::MetadataPointer,
-            ExtensionType::TokenMetadata,
-            ExtensionType::MintCloseAuthority,
         ];
 
-        let space = ExtensionType::try_calculate_account_len::<MintState>(&extensions)?;
-        let lamports = Rent::get()?.minimum_balance(space);
+        let metadata = TokenMetadata {
+            update_authority: spl_pod::optional_keys::OptionalNonZeroPubkey::try_from(Some(
+                self.payer.key(),
+            ))
+            .unwrap(),
+            mint: self.mint.key(),
+            name: TOKEN_NAME.to_string(),
+            symbol: TOKEN_SYMBOL.to_string(),
+            uri: TOKEN_URI.to_string(),
+            additional_metadata: vec![],
+        };
+
+        // The on-chain program requires the mint to be EXACTLY sized for the
+        // extensions initialized so far (any slack fails InitializeMint), so
+        // allocate exactly `space`...
+        let space =
+            ExtensionType::try_calculate_account_len::<MintState>(fixed_extensions)?;
+        // ...but fund for the final size: token_metadata_initialize grows the
+        // account itself by header + packed metadata, and it must stay
+        // rent-exempt after growing.
+        let lamports =
+            Rent::get()?.minimum_balance(space + TLV_HEADER_LEN + metadata.get_packed_len()?);
 
         anchor_lang::system_program::create_account(
             CpiContext::new(
@@ -57,15 +74,16 @@ impl<'info> InitializeMint<'info> {
             ),
             lamports,
             space as u64,
-            &self.payer.key(),
+            &self.token_program.key(),
         )?;
 
+        self.transfer_fee_config()?;
+        self.mint_close_config()?;
         self.default_state_config()?;
         self.metadata_pointer_config()?;
-        self.mint_close_config()?;
-        self.token_metadatat_config()?;
-        self.transfer_fee_config()?;
 
+        // Mint authority = payer, freeze authority = payer (new accounts
+        // default to Frozen; each is thawed after KYC).
         initialize_mint2(
             CpiContext::new(
                 self.token_program.key(),
@@ -73,15 +91,17 @@ impl<'info> InitializeMint<'info> {
                     mint: self.mint.to_account_info(),
                 },
             ),
-            6,
+            DECIMALS,
             &self.payer.key(),
-            None,
+            Some(&self.payer.key()),
         )?;
 
+        // Metadata goes last: it needs an initialized mint.
+        self.token_metadata_config()?;
         Ok(())
     }
 
-    pub fn default_state_config(&mut self) -> Result<()> {
+    pub fn default_state_config(&self) -> Result<()> {
         default_account_state_initialize(
             CpiContext::new(
                 self.token_program.key(),
@@ -94,7 +114,7 @@ impl<'info> InitializeMint<'info> {
         )
     }
 
-    pub fn metadata_pointer_config(&mut self) -> Result<()> {
+    pub fn metadata_pointer_config(&self) -> Result<()> {
         metadata_pointer_initialize(
             CpiContext::new(
                 self.token_program.key(),
@@ -108,7 +128,7 @@ impl<'info> InitializeMint<'info> {
         )
     }
 
-    pub fn mint_close_config(&mut self) -> Result<()> {
+    pub fn mint_close_config(&self) -> Result<()> {
         mint_close_authority_initialize(
             CpiContext::new(
                 self.token_program.key(),
@@ -121,7 +141,7 @@ impl<'info> InitializeMint<'info> {
         )
     }
 
-    pub fn transfer_fee_config(&mut self) -> Result<()> {
+    pub fn transfer_fee_config(&self) -> Result<()> {
         transfer_fee_initialize(
             CpiContext::new(
                 self.token_program.key(),
@@ -132,12 +152,12 @@ impl<'info> InitializeMint<'info> {
             ),
             Some(&self.payer.key()),
             Some(&self.payer.key()),
-            100,
-            u64::MAX,
+            TRANSFER_FEE_BPS,
+            MAXIMUM_FEE,
         )
     }
 
-    pub fn token_metadatat_config(&mut self) -> Result<()> {
+    pub fn token_metadata_config(&self) -> Result<()> {
         token_metadata_initialize(
             CpiContext::new(
                 self.token_program.key(),
@@ -149,9 +169,9 @@ impl<'info> InitializeMint<'info> {
                     metadata: self.mint.to_account_info(),
                 },
             ),
-            String::from("Test name"),
-            String::from("Test symbol"),
-            String::from("Test uri"),
+            TOKEN_NAME.to_string(),
+            TOKEN_SYMBOL.to_string(),
+            TOKEN_URI.to_string(),
         )
     }
 }
