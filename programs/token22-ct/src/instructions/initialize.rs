@@ -83,7 +83,7 @@ impl<'info> InitializeMint<'info> {
         self.metadata_pointer_config()?;
 
         // Mint authority = payer, freeze authority = payer (new accounts
-        // default to Frozen; each is thawed after KYC).
+        // default to Frozen; each is unfrozen after KYC).
         initialize_mint2(
             CpiContext::new(
                 self.token_program.key(),

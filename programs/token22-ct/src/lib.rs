@@ -23,4 +23,8 @@ pub mod token22_ct {
     ) -> Result<()> {
         ctx.accounts.transfer(amount, decimals)
     }
+
+    pub fn unfreeze_kyc_account(ctx: Context<UnfreezeKycAccount>) -> Result<()> {
+        ctx.accounts.unfreeze()
+    }
 }

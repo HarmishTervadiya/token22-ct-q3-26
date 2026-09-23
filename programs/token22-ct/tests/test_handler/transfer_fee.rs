@@ -117,7 +117,7 @@ pub fn balances(svm: &LiteSVM, account: &Keypair) -> (u64, u64) {
     (state.base.amount, withheld)
 }
 
-pub fn is_thawed(svm: &LiteSVM, account: &Keypair) -> bool {
+pub fn is_unfrozen(svm: &LiteSVM, account: &Keypair) -> bool {
     let data = svm.get_account(&account.pubkey()).unwrap().data.clone();
     StateWithExtensions::<TokenAccount>::unpack(&data)
         .unwrap()

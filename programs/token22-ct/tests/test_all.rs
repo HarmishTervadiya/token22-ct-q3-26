@@ -21,7 +21,7 @@ use {
     solana_transaction::versioned::VersionedTransaction,
     spl_token_metadata_interface::state::TokenMetadata,
     spl_type_length_value::variable_len_pack::VariableLenPack,
-    test_handler::{initialize, transfer_fee},
+    test_handler::{initialize, transfer_fee, unfreeze},
 };
 
 fn setup() -> (LiteSVM, Keypair) {
@@ -45,7 +45,11 @@ fn send(svm: &mut LiteSVM, payer: &Keypair, signers: &[&Keypair], ixs: Vec<Instr
     let blockhash = svm.latest_blockhash();
     let msg = Message::new_with_blockhash(&ixs, Some(&payer.pubkey()), &blockhash);
     let mut all = vec![payer];
-    all.extend_from_slice(signers);
+    for s in signers {
+        if !all.iter().any(|k| k.pubkey() == s.pubkey()) {
+            all.push(*s);
+        }
+    }
     let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &all).unwrap();
     if let Err(e) = svm.send_transaction(tx) {
         panic!("transaction failed: {:?}", e);
@@ -205,6 +209,25 @@ fn test_transfer_with_fee() {
 
     assert_eq!(transfer_fee::balances(&svm, &src), (40_000, 0));
     assert_eq!(transfer_fee::balances(&svm, &dst), (9_900, 100));
-    assert!(transfer_fee::is_thawed(&svm, &src));
-    assert!(transfer_fee::is_thawed(&svm, &dst));
+    assert!(transfer_fee::is_unfrozen(&svm, &src));
+    assert!(transfer_fee::is_unfrozen(&svm, &dst));
+}
+
+#[test]
+fn test_unfreeze_after_kyc() {
+    let (mut svm, payer) = setup();
+    let mint = initialize::init_mint(&mut svm, &payer);
+    let user = Keypair::new();
+    let acc = unfreeze::create_frozen_account(&mut svm, &payer, &mint, &user);
+    assert!(!transfer_fee::is_unfrozen(&svm, &acc));
+
+    unfreeze::unfreeze_via_program(&mut svm, &payer, &payer, &acc, &mint);
+    assert!(transfer_fee::is_unfrozen(&svm, &acc));
+
+    let data = initialize::mint_data(&svm, &mint);
+    let state = StateWithExtensions::<MintState>::unpack(&data).unwrap();
+    let default_state = state
+        .get_extension::<DefaultAccountState>()
+        .unwrap();
+    assert_eq!(default_state.state, AccountState::Frozen as u8);
 }
