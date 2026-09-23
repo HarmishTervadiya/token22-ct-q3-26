@@ -33,3 +33,9 @@ delegated-transfer path still works unmodified.
 
 Written finding, not code: what happens if a sanctioned user moves their balance into the confidential
 system before the permanent delegate acts?
+
+Finding: once the user deposits into pending and applies into available confidential balance,
+the funds become unseizable. PermanentDelegate moves only plaintext balances, while confidential
+balances move only with owner-signed ZK proofs the delegate cannot forge. The delegate can still
+freeze and seize the user's public balance, so seizure must win the race to action. Privacy, once
+entered, is a one-way shield (auditor keys allow viewing, never seizing).
