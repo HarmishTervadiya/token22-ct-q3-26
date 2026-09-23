@@ -15,4 +15,12 @@ pub mod token22_ct {
     pub fn initialize(ctx: Context<InitializeMint>) -> Result<()> {
         ctx.accounts.initialize()
     }
+
+    pub fn transfer_with_fee(
+        ctx: Context<TransferWithFee>,
+        amount: u64,
+        decimals: u8,
+    ) -> Result<()> {
+        ctx.accounts.transfer(amount, decimals)
+    }
 }

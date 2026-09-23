@@ -1,12 +1,8 @@
-// Tests for `initialize`. The SVM tests load `target/deploy/token22_ct.so`
-// at runtime, so run `anchor build` before `cargo test`.
+mod test_handler;
+
 use {
-    anchor_lang::{
-        solana_program::{instruction::Instruction, system_program},
-        InstructionData, ToAccountMetas,
-    },
+    anchor_lang::solana_program::instruction::Instruction,
     anchor_spl::token_2022::spl_token_2022::{
-        self,
         extension::{
             default_account_state::DefaultAccountState,
             metadata_pointer::MetadataPointer,
@@ -25,33 +21,11 @@ use {
     solana_transaction::versioned::VersionedTransaction,
     spl_token_metadata_interface::state::TokenMetadata,
     spl_type_length_value::variable_len_pack::VariableLenPack,
+    test_handler::{initialize, transfer_fee},
 };
 
-fn fixed_extensions() -> [ExtensionType; 4] {
-    [
-        ExtensionType::TransferFeeConfig,
-        ExtensionType::MintCloseAuthority,
-        ExtensionType::DefaultAccountState,
-        ExtensionType::MetadataPointer,
-    ]
-}
-
-fn metadata_probe() -> TokenMetadata {
-    // Packed length depends only on the string lengths, so this matches the
-    // program's metadata exactly.
-    TokenMetadata {
-        update_authority: spl_pod::optional_keys::OptionalNonZeroPubkey::default(),
-        mint: spl_token_2022::ID,
-        name: token22_ct::TOKEN_NAME.to_string(),
-        symbol: token22_ct::TOKEN_SYMBOL.to_string(),
-        uri: token22_ct::TOKEN_URI.to_string(),
-        additional_metadata: vec![],
-    }
-}
-
-fn setup() -> (LiteSVM, Keypair, Keypair) {
+fn setup() -> (LiteSVM, Keypair) {
     let payer = Keypair::new();
-    let mint = Keypair::new();
 
     let mut svm = LiteSVM::new();
     let program_path =
@@ -64,10 +38,20 @@ fn setup() -> (LiteSVM, Keypair, Keypair) {
     svm.add_program_from_file(token22_ct::ID, program_path).unwrap();
     svm.airdrop(&payer.pubkey(), 1_000_000_000).unwrap();
 
-    (svm, payer, mint)
+    (svm, payer)
 }
 
-/// Compare raw bytes to stay independent of Pubkey crate versions.
+fn send(svm: &mut LiteSVM, payer: &Keypair, signers: &[&Keypair], ixs: Vec<Instruction>) {
+    let blockhash = svm.latest_blockhash();
+    let msg = Message::new_with_blockhash(&ixs, Some(&payer.pubkey()), &blockhash);
+    let mut all = vec![payer];
+    all.extend_from_slice(signers);
+    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &all).unwrap();
+    if let Err(e) = svm.send_transaction(tx) {
+        panic!("transaction failed: {:?}", e);
+    }
+}
+
 fn opt_bytes(k: spl_pod::optional_keys::OptionalNonZeroPubkey) -> [u8; 32] {
     k.0.to_bytes()
 }
@@ -79,56 +63,18 @@ fn copt_bytes(k: COption<Pubkey>) -> Option<[u8; 32]> {
     }
 }
 
-fn send_initialize(svm: &mut LiteSVM, payer: &Keypair, mint: &Keypair) {
-    let instruction = Instruction {
-        program_id: token22_ct::ID,
-        accounts: token22_ct::accounts::InitializeMint {
-            mint: mint.pubkey(),
-            payer: payer.pubkey(),
-            system_program: system_program::ID,
-            token_program: spl_token_2022::ID,
-        }
-        .to_account_metas(None),
-        data: token22_ct::instruction::Initialize {}.data(),
-    };
-
-    let blockhash = svm.latest_blockhash();
-    let msg = Message::new_with_blockhash(&[instruction], Some(&payer.pubkey()), &blockhash);
-    let tx =
-        VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[payer, mint]).unwrap();
-
-    if let Err(e) = svm.send_transaction(tx) {
-        panic!("initialize transaction failed: {:?}", e);
-    }
-}
-
-/// Initializes a mint and returns the raw on-chain account data. All reads
-/// below go through StateWithExtensions, never raw unpack.
-fn initialized_mint_data() -> (LiteSVM, Keypair, Keypair, Vec<u8>) {
-    let (mut svm, payer, mint) = setup();
-    send_initialize(&mut svm, &payer, &mint);
-    let account = svm
-        .get_account(&mint.pubkey())
-        .expect("mint account must exist after initialize");
-    assert_eq!(
-        account.owner.to_bytes(),
-        spl_token_2022::ID.to_bytes(),
-        "mint owner must be the Token-2022 program"
-    );
-    let data = account.data.clone();
-    (svm, payer, mint, data)
-}
-
 #[test]
 fn test_initialize() {
-    let (mut svm, payer, mint) = setup();
-    send_initialize(&mut svm, &payer, &mint);
+    let (mut svm, payer) = setup();
+    let mint = initialize::init_mint(&mut svm, &payer);
     assert!(svm.get_account(&mint.pubkey()).is_some());
 }
 
 #[test]
 fn test_mint_base_state() {
-    let (_svm, payer, _mint, data) = initialized_mint_data();
+    let (mut svm, payer) = setup();
+    let mint = initialize::init_mint(&mut svm, &payer);
+    let data = initialize::mint_data(&svm, &mint);
     let state = StateWithExtensions::<MintState>::unpack(&data).unwrap();
     assert_eq!(state.base.decimals, token22_ct::DECIMALS);
     assert!(state.base.is_initialized);
@@ -145,10 +91,11 @@ fn test_mint_base_state() {
 
 #[test]
 fn test_extensions() {
-    let (_svm, payer, mint, data) = initialized_mint_data();
+    let (mut svm, payer) = setup();
+    let mint = initialize::init_mint(&mut svm, &payer);
+    let data = initialize::mint_data(&svm, &mint);
     let state = StateWithExtensions::<MintState>::unpack(&data).unwrap();
 
-    // Transfer fee: 100 bps into newer_transfer_fee, live epoch math.
     let fee = state.get_extension::<TransferFeeConfig>().unwrap();
     assert_eq!(
         u16::from(fee.newer_transfer_fee.transfer_fee_basis_points),
@@ -164,11 +111,9 @@ fn test_extensions() {
     );
     assert_eq!(fee.calculate_epoch_fee(0, 10_000).unwrap(), 100);
 
-    // New accounts default to Frozen.
     let default_state = state.get_extension::<DefaultAccountState>().unwrap();
     assert_eq!(default_state.state, AccountState::Frozen as u8);
 
-    // Metadata pointer aims at the mint itself.
     let pointer = state.get_extension::<MetadataPointer>().unwrap();
     assert_eq!(opt_bytes(pointer.authority), payer.pubkey().to_bytes());
     assert_eq!(
@@ -176,14 +121,12 @@ fn test_extensions() {
         mint.pubkey().to_bytes()
     );
 
-    // Mint close authority is set.
     let close = state.get_extension::<MintCloseAuthority>().unwrap();
     assert_eq!(
         opt_bytes(close.close_authority),
         payer.pubkey().to_bytes()
     );
 
-    // Exactly the expected set, nothing more.
     let mut types = state.get_extension_types().unwrap();
     let mut expected = vec![
         ExtensionType::TransferFeeConfig,
@@ -199,7 +142,9 @@ fn test_extensions() {
 
 #[test]
 fn test_token_metadata_onchain() {
-    let (_svm, payer, mint, data) = initialized_mint_data();
+    let (mut svm, payer) = setup();
+    let mint = initialize::init_mint(&mut svm, &payer);
+    let data = initialize::mint_data(&svm, &mint);
     let state = StateWithExtensions::<MintState>::unpack(&data).unwrap();
     let metadata = state.get_variable_len_extension::<TokenMetadata>().unwrap();
     assert_eq!(metadata.name, token22_ct::TOKEN_NAME);
@@ -214,19 +159,18 @@ fn test_token_metadata_onchain() {
 
 #[test]
 fn test_mint_size_and_rent() {
-    let (svm, _payer, mint, data) = initialized_mint_data();
-    // Exact fixed size at mint-init, then metadata init grows the account by
-    // the 4-byte TLV header plus the packed metadata.
-    let base = ExtensionType::try_calculate_account_len::<MintState>(&fixed_extensions()).unwrap();
-    let expected = base + 4 + metadata_probe().get_packed_len().unwrap();
+    let (mut svm, _payer) = setup();
+    let mint = initialize::init_mint(&mut svm, &_payer);
+    let data = initialize::mint_data(&svm, &mint);
+    let base =
+        ExtensionType::try_calculate_account_len::<MintState>(&initialize::fixed_extensions())
+            .unwrap();
+    let expected = base + 4 + initialize::metadata_probe().get_packed_len().unwrap();
     assert_eq!(data.len(), expected);
     let lamports = svm.get_account(&mint.pubkey()).unwrap().lamports;
     assert!(lamports >= svm.minimum_balance_for_rent_exemption(expected));
 }
 
-/// Host-native regression test: TokenMetadata is variable-length, so it must
-/// never go through try_calculate_account_len (that was the original
-/// InvalidArgument bug). No .so needed.
 #[test]
 fn test_token_metadata_must_not_use_try_calculate() {
     let with_metadata = [
@@ -237,4 +181,30 @@ fn test_token_metadata_must_not_use_try_calculate() {
         ExtensionType::TokenMetadata,
     ];
     assert!(ExtensionType::try_calculate_account_len::<MintState>(&with_metadata).is_err());
+}
+
+#[test]
+fn test_transfer_with_fee() {
+    let (mut svm, payer) = setup();
+    let mint = initialize::init_mint(&mut svm, &payer);
+    let user = Keypair::new();
+    let src = transfer_fee::create_token_account(&mut svm, &payer, &mint, &user);
+    let dst = transfer_fee::create_token_account(&mut svm, &payer, &mint, &user);
+    transfer_fee::mint_to(&mut svm, &payer, &mint, &src, 50_000);
+
+    let mint_data = initialize::mint_data(&svm, &mint);
+    let mint_state = StateWithExtensions::<MintState>::unpack(&mint_data).unwrap();
+    let expected_fee = mint_state
+        .get_extension::<TransferFeeConfig>()
+        .unwrap()
+        .calculate_epoch_fee(0, 10_000)
+        .unwrap();
+    assert_eq!(expected_fee, 100);
+
+    transfer_fee::transfer_via_program(&mut svm, &payer, &user, &src, &dst, &mint, 10_000);
+
+    assert_eq!(transfer_fee::balances(&svm, &src), (40_000, 0));
+    assert_eq!(transfer_fee::balances(&svm, &dst), (9_900, 100));
+    assert!(transfer_fee::is_thawed(&svm, &src));
+    assert!(transfer_fee::is_thawed(&svm, &dst));
 }
